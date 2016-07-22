@@ -4,15 +4,16 @@
 import time
 import os.path
 try:
-    from libvirt import libvirtError, VIR_DOMAIN_XML_SECURE, \
-        VIR_MIGRATE_LIVE, VIR_MIGRATE_UNSAFE, \
-        VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
+    from libvirt import libvirtError, VIR_DOMAIN_XML_SECURE, VIR_MIGRATE_LIVE, \
+        VIR_MIGRATE_UNSAFE, VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA
 except:
     from libvirt import libvirtError, VIR_DOMAIN_XML_SECURE, VIR_MIGRATE_LIVE
 from vrtManager import util
 from xml.etree import ElementTree
 from datetime import datetime
 from vrtManager.connection import wvmConnect
+
+from webvirtmgr.settings import QEMU_CONSOLE_TYPES
 
 
 class wvmInstances(wvmConnect):
@@ -123,7 +124,7 @@ class wvmInstance(wvmConnect):
         return self.instance.XMLDesc(flag)
 
     def _defineXML(self, xml):
-        self.wvm.defineXML(xml)
+        return self.wvm.defineXML(xml)
 
     def get_status(self):
         return self.instance.info()[0]
@@ -341,13 +342,17 @@ class wvmInstance(wvmConnect):
                         dev_file = dev_bus
                     devices.append([dev_file, dev_bus])
         for dev in devices:
-            rd_use_ago = self.instance.blockStats(dev[0])[1]
-            wr_use_ago = self.instance.blockStats(dev[0])[3]
-            time.sleep(1)
-            rd_use_now = self.instance.blockStats(dev[0])[1]
-            wr_use_now = self.instance.blockStats(dev[0])[3]
-            rd_diff_usage = rd_use_now - rd_use_ago
-            wr_diff_usage = wr_use_now - wr_use_ago
+            if self.get_status() == 1:
+                rd_use_ago = self.instance.blockStats(dev[0])[1]
+                wr_use_ago = self.instance.blockStats(dev[0])[3]
+                time.sleep(1)
+                rd_use_now = self.instance.blockStats(dev[0])[1]
+                wr_use_now = self.instance.blockStats(dev[0])[3]
+                rd_diff_usage = rd_use_now - rd_use_ago
+                wr_diff_usage = wr_use_now - wr_use_ago
+            else:
+                rd_diff_usage = 0
+                wr_diff_usage = 0
             dev_usage.append({'dev': dev[1], 'rd': rd_diff_usage, 'wr': wr_diff_usage})
         return dev_usage
 
@@ -355,17 +360,22 @@ class wvmInstance(wvmConnect):
         devices = []
         dev_usage = []
         tree = ElementTree.fromstring(self._XMLDesc(0))
-        for target in tree.findall("devices/interface/target"):
-            devices.append(target.get("dev"))
-        for i, dev in enumerate(devices):
-            rx_use_ago = self.instance.interfaceStats(dev)[0]
-            tx_use_ago = self.instance.interfaceStats(dev)[4]
-            time.sleep(1)
-            rx_use_now = self.instance.interfaceStats(dev)[0]
-            tx_use_now = self.instance.interfaceStats(dev)[4]
-            rx_diff_usage = (rx_use_now - rx_use_ago) * 8
-            tx_diff_usage = (tx_use_now - tx_use_ago) * 8
-            dev_usage.append({'dev': i, 'rx': rx_diff_usage, 'tx': tx_diff_usage})
+        if self.get_status() == 1:
+            tree = ElementTree.fromstring(self._XMLDesc(0))
+            for target in tree.findall("devices/interface/target"):
+                devices.append(target.get("dev"))
+            for i, dev in enumerate(devices):
+                rx_use_ago = self.instance.interfaceStats(dev)[0]
+                tx_use_ago = self.instance.interfaceStats(dev)[4]
+                time.sleep(1)
+                rx_use_now = self.instance.interfaceStats(dev)[0]
+                tx_use_now = self.instance.interfaceStats(dev)[4]
+                rx_diff_usage = (rx_use_now - rx_use_ago) * 8
+                tx_diff_usage = (tx_use_now - tx_use_ago) * 8
+                dev_usage.append({'dev': i, 'rx': rx_diff_usage, 'tx': tx_diff_usage})
+        else:
+            for i, dev in enumerate(self.get_net_device()):
+                dev_usage.append({'dev': i, 'rx': 0, 'tx': 0})
         return dev_usage
 
     def get_telnet_port(self):
@@ -384,57 +394,101 @@ class wvmInstance(wvmConnect):
                                 telnet_port = service_port
         return telnet_port
 
-    def get_vnc_port(self):
-        vnc_port = util.get_xml_path(self._XMLDesc(0),
-                                     "/domain/devices/graphics[@type='vnc']/@port")
-        return vnc_port
+    def get_console_listen_addr(self):
+        listen_addr = util.get_xml_path(self._XMLDesc(0),
+                                        "/domain/devices/graphics/@listen")
+        if listen_addr is None:
+            listen_addr = util.get_xml_path(self._XMLDesc(0),
+                                            "/domain/devices/graphics/listen/@address")
+            if listen_addr is None:
+                return "127.0.0.1"
+        return listen_addr
 
-    def get_vnc_websocket_port(self):
-        vnc_websocket_port = util.get_xml_path(self._XMLDesc(0),
-                                               "/domain/devices/graphics[@type='vnc']/@websocket")
-        return vnc_websocket_port
+    def get_console_socket(self):
+        socket = util.get_xml_path(self._XMLDesc(0),
+                                   "/domain/devices/graphics/@socket")
+        return socket
 
-    def get_vnc_passwd(self):
+    def get_console_type(self):
+        console_type = util.get_xml_path(self._XMLDesc(0),
+                                         "/domain/devices/graphics/@type")
+        return console_type
+
+    def set_console_type(self, console_type):
+        current_type = self.get_console_type()
+        if current_type == console_type:
+            return True
+        if console_type == '' or console_type not in QEMU_CONSOLE_TYPES:
+            return False
+        xml = self._XMLDesc(VIR_DOMAIN_XML_SECURE)
+        root = ElementTree.fromstring(xml)
+        try:
+            graphic = root.find("devices/graphics[@type='%s']" % current_type)
+        except SyntaxError:
+            # Little fix for old version ElementTree
+            graphic = root.find("devices/graphics")
+        graphic.set('type', console_type)
+        newxml = ElementTree.tostring(root)
+        self._defineXML(newxml)
+
+    def get_console_port(self, console_type=None):
+        if console_type is None:
+            console_type = self.get_console_type()
+        port = util.get_xml_path(self._XMLDesc(0),
+                                 "/domain/devices/graphics[@type='%s']/@port" % console_type)
+        return port
+
+    def get_console_websocket_port(self):
+        console_type = self.get_console_type()
+        websocket_port = util.get_xml_path(self._XMLDesc(0),
+                                           "/domain/devices/graphics[@type='%s']/@websocket" % console_type)
+        return websocket_port
+
+    def get_console_passwd(self):
         return util.get_xml_path(self._XMLDesc(VIR_DOMAIN_XML_SECURE),
                                  "/domain/devices/graphics/@passwd")
 
-    def set_vnc_passwd(self, passwd):
+    def set_console_passwd(self, passwd):
         xml = self._XMLDesc(VIR_DOMAIN_XML_SECURE)
         root = ElementTree.fromstring(xml)
+        console_type = self.get_console_type()
         try:
-            graphics_vnc = root.find("devices/graphics[@type='vnc']")
+            graphic = root.find("devices/graphics[@type='%s']" % console_type)
         except SyntaxError:
             # Little fix for old version ElementTree
-            graphics_vnc = root.find("devices/graphics")
+            graphic = root.find("devices/graphics")
+        if graphic is None:
+            return False
         if passwd:
-            graphics_vnc.set('passwd', passwd)
+            graphic.set('passwd', passwd)
         else:
             try:
-                graphics_vnc.attrib.pop('passwd')
+                graphic.attrib.pop('passwd')
             except:
                 pass
         newxml = ElementTree.tostring(root)
-        self._defineXML(newxml)
+        return self._defineXML(newxml)
 
-    def set_vnc_keymap(self, keymap):
+    def set_console_keymap(self, keymap):
         xml = self._XMLDesc(VIR_DOMAIN_XML_SECURE)
         root = ElementTree.fromstring(xml)
+        console_type = self.get_console_type()
         try:
-            graphics_vnc = root.find("devices/graphics[@type='vnc']")
+            graphic = root.find("devices/graphics[@type='%s']" % console_type)
         except SyntaxError:
             # Little fix for old version ElementTree
-            graphics_vnc = root.find("devices/graphics")
+            graphic = root.find("devices/graphics")
         if keymap:
-            graphics_vnc.set('keymap', keymap)
+            graphic.set('keymap', keymap)
         else:
             try:
-                graphics_vnc.attrib.pop('keymap')
+                graphic.attrib.pop('keymap')
             except:
                 pass
         newxml = ElementTree.tostring(root)
         self._defineXML(newxml)
 
-    def get_vnc_keymap(self):
+    def get_console_keymap(self):
         return util.get_xml_path(self._XMLDesc(VIR_DOMAIN_XML_SECURE),
                                  "/domain/devices/graphics/@keymap") or ''
 
@@ -478,7 +532,7 @@ class wvmInstance(wvmConnect):
                 except:
                     pass
                 for img in stg.listVolumes():
-                    if img.endswith('.iso'):
+                    if img.lower().endswith('.iso'):
                         iso.append(img)
         return iso
 

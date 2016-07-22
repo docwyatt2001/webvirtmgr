@@ -6,6 +6,7 @@ from django.shortcuts import render_to_response
 from django.http import HttpResponseRedirect, HttpResponse
 from django.template import RequestContext
 from django.utils.translation import ugettext_lazy as _
+from django.core.urlresolvers import reverse
 import json
 import time
 from django.core.exceptions import PermissionDenied
@@ -16,7 +17,7 @@ from servers.models import Compute
 from vrtManager.instance import wvmInstances, wvmInstance
 
 from libvirt import libvirtError, VIR_DOMAIN_XML_SECURE
-from webvirtmgr.settings import TIME_JS_REFRESH, QEMU_KEYMAPS
+from webvirtmgr.settings import TIME_JS_REFRESH, QEMU_KEYMAPS, QEMU_CONSOLE_TYPES
 
 
 def instusage(request, host_id, vname):
@@ -24,7 +25,7 @@ def instusage(request, host_id, vname):
     Return instance usage
     """
     if not request.user.is_authenticated():
-        return HttpResponseRedirect('/login')
+        return HttpResponseRedirect(reverse('login'))
 
     cookies = {}
     datasets = {}
@@ -38,11 +39,12 @@ def instusage(request, host_id, vname):
     json_net = []
     cookie_net = {}
     net_error = False
-    networks = None
-    disks = None
     points = 5
     curent_time = time.strftime("%H:%M:%S")
     compute = Compute.objects.get(id=host_id)
+    cookies = request._get_cookies()
+    response = HttpResponse()
+    response['Content-Type'] = "text/javascript"
 
     try:
         conn = wvmInstance(compute.hostname,
@@ -51,38 +53,17 @@ def instusage(request, host_id, vname):
                            compute.type,
                            vname,
                            compute.hypervisor)
-        status = conn.get_status()
-        if status == 3 or status == 5:
-            networks = conn.get_net_device()
-            disks = conn.get_disk_device()
-        else:
-            cpu_usage = conn.cpu_usage()
-            blk_usage = conn.disk_usage()
-            net_usage = conn.net_usage()
+        cpu_usage = conn.cpu_usage()
+        blk_usage = conn.disk_usage()
+        net_usage = conn.net_usage()
         conn.close()
-    except libvirtError:
-        status = None
-        blk_usage = None
-        cpu_usage = None
-        net_usage = None
 
-    if status and status == 1:
-        try:
-            cookies['cpu'] = request._cookies['cpu']
-            cookies['hdd'] = request._cookies['hdd']
-            cookies['net'] = request._cookies['net']
-            cookies['timer'] = request._cookies['timer']
-        except KeyError:
-            cookies['cpu'] = None
-            cookies['hdd'] = None
-            cookies['net'] = None
-
-        if cookies['cpu'] == '{}' or not cookies['cpu'] or not cpu_usage:
+        if cookies.get('cpu') == '{}' or not cookies.get('cpu') or not cpu_usage:
             datasets['cpu'] = [0]
             datasets['timer'] = [curent_time]
         else:
-            datasets['cpu'] = eval(cookies['cpu'])
-            datasets['timer'] = eval(cookies['timer'])
+            datasets['cpu'] = eval(cookies.get('cpu'))
+            datasets['timer'] = eval(cookies.get('timer'))
 
         datasets['timer'].append(curent_time)
         datasets['cpu'].append(int(cpu_usage['cpu']))
@@ -106,11 +87,11 @@ def instusage(request, host_id, vname):
         }
 
         for blk in blk_usage:
-            if cookies['hdd'] == '{}' or not cookies['hdd'] or not blk_usage:
+            if cookies.get('hdd') == '{}' or not cookies.get('hdd') or not blk_usage:
                 datasets_wr.append(0)
                 datasets_rd.append(0)
             else:
-                datasets['hdd'] = eval(cookies['hdd'])
+                datasets['hdd'] = eval(cookies.get('hdd'))
                 try:
                     datasets_rd = datasets['hdd'][blk['dev']][0]
                     datasets_wr = datasets['hdd'][blk['dev']][1]
@@ -123,7 +104,7 @@ def instusage(request, host_id, vname):
 
                 if len(datasets_rd) > points:
                     datasets_rd.pop(0)
-                if len(datasets_wr) >= points + 1:
+                if len(datasets_wr) > points:
                     datasets_wr.pop(0)
 
                 disk = {
@@ -150,11 +131,11 @@ def instusage(request, host_id, vname):
                 cookie_blk[blk['dev']] = [datasets_rd, datasets_wr]
 
         for net in net_usage:
-            if cookies['net'] == '{}' or not cookies['net'] or not net_usage:
+            if cookies.get('net') == '{}' or not cookies.get('net') or not net_usage:
                 datasets_rx.append(0)
                 datasets_tx.append(0)
             else:
-                datasets['net'] = eval(cookies['net'])
+                datasets['net'] = eval(cookies.get('net'))
                 try:
                     datasets_rx = datasets['net'][net['dev']][0]
                     datasets_tx = datasets['net'][net['dev']][1]
@@ -192,78 +173,43 @@ def instusage(request, host_id, vname):
 
             json_net.append({'dev': net['dev'], 'data': network})
             cookie_net[net['dev']] = [datasets_rx, datasets_tx]
-    else:
-        datasets = [0] * points
-        cpu = {
-            'labels': [""] * points,
-            'datasets': [
-                {
-                    "fillColor": "rgba(241,72,70,0.5)",
-                    "strokeColor": "rgba(241,72,70,1)",
-                    "pointColor": "rgba(241,72,70,1)",
-                    "pointStrokeColor": "#fff",
-                    "data": datasets
-                }
-            ]
-        }
 
-        for i, net in enumerate(networks):
-            datasets_rx = [0] * points
-            datasets_tx = [0] * points
-            network = {
-                'labels': [""] * points,
-                'datasets': [
-                    {
-                        "fillColor": "rgba(83,191,189,0.5)",
-                        "strokeColor": "rgba(83,191,189,1)",
-                        "pointColor": "rgba(83,191,189,1)",
-                        "pointStrokeColor": "#fff",
-                        "data": datasets_rx
-                    },
-                    {
-                        "fillColor": "rgba(151,187,205,0.5)",
-                        "strokeColor": "rgba(151,187,205,1)",
-                        "pointColor": "rgba(151,187,205,1)",
-                        "pointStrokeColor": "#fff",
-                        "data": datasets_tx
-                    },
-                ]
-            }
-            json_net.append({'dev': i, 'data': network})
-
-        for blk in disks:
-            datasets_wr = [0] * points
-            datasets_rd = [0] * points
-            disk = {
-                'labels': [""] * points,
-                'datasets': [
-                    {
-                        "fillColor": "rgba(83,191,189,0.5)",
-                        "strokeColor": "rgba(83,191,189,1)",
-                        "pointColor": "rgba(83,191,189,1)",
-                        "pointStrokeColor": "#fff",
-                        "data": datasets_rd
-                    },
-                    {
-                        "fillColor": "rgba(249,134,33,0.5)",
-                        "strokeColor": "rgba(249,134,33,1)",
-                        "pointColor": "rgba(249,134,33,1)",
-                        "pointStrokeColor": "#fff",
-                        "data": datasets_wr
-                    },
-                ]
-            }
-            json_blk.append({'dev': blk['dev'], 'data': disk})
-
-    data = json.dumps({'status': status, 'cpu': cpu, 'hdd': json_blk, 'net': json_net})
-
-    response = HttpResponse()
-    response['Content-Type'] = "text/javascript"
-    if status == 1:
+        data = json.dumps({'cpu': cpu, 'hdd': json_blk, 'net': json_net})
         response.cookies['cpu'] = datasets['cpu']
         response.cookies['timer'] = datasets['timer']
         response.cookies['hdd'] = cookie_blk
         response.cookies['net'] = cookie_net
+        response.write(data)
+    except libvirtError:
+        data = json.dumps({'error': 'Error 500'})
+        response.write(data)
+    return response
+
+
+def inst_status(request, host_id, vname):
+    """
+    Instance block
+    """
+    if not request.user.is_authenticated():
+        return HttpResponseRedirect(reverse('login'))
+
+    compute = Compute.objects.get(id=host_id)
+
+    try:
+        conn = wvmInstance(compute.hostname,
+                           compute.login,
+                           compute.password,
+                           compute.type,
+                           vname,
+                           compute.hypervisor)
+        status = conn.get_status()
+        conn.close()
+    except libvirtError:
+        status = None
+
+    data = json.dumps({'status': status})
+    response = HttpResponse()
+    response['Content-Type'] = "text/javascript"
     response.write(data)
     return response
 
@@ -273,7 +219,7 @@ def insts_status(request, host_id):
     Instances block
     """
     if not request.user.is_authenticated():
-        return HttpResponseRedirect('/login')
+        return HttpResponseRedirect(reverse('login'))
 
     errors = []
     instances = []
@@ -290,23 +236,17 @@ def insts_status(request, host_id):
         errors.append(err)
 
     for instance in get_instances:
+        instance_info = ({'name': instance,
+                          'status': conn.get_instance_status(instance),
+                          'memory': conn.get_instance_memory(instance),
+                          'vcpu': conn.get_instance_vcpu(instance),
+                          'uuid': conn.get_uuid(instance),
+                          'host': host_id,
+                          'hypervisor': compute.hypervisor
+                          })
         if compute.hypervisor == 'qemu':
-            instances.append({'name': instance,
-                              'status': conn.get_instance_status(instance),
-                              'memory': conn.get_instance_memory(instance),
-                              'vcpu': conn.get_instance_vcpu(instance),
-                              'uuid': conn.get_uuid(instance),
-                              'host': host_id,
-                              'dump': conn.get_instance_managed_save_image(instance)
-                              })
-        else:
-            instances.append({'name': instance,
-                              'status': conn.get_instance_status(instance),
-                              'memory': conn.get_instance_memory(instance),
-                              'vcpu': conn.get_instance_vcpu(instance),
-                              'uuid': conn.get_uuid(instance),
-                              'host': host_id
-                              })
+            instance_info['dump'] = conn.get_instance_managed_save_image(instance)
+        instances.append(instance_info)
 
     data = json.dumps(instances)
     response = HttpResponse()
@@ -320,7 +260,7 @@ def instances(request, host_id):
     Instances block
     """
     if not request.user.is_authenticated():
-        return HttpResponseRedirect('/login')
+        return HttpResponseRedirect(reverse('login'))
 
     errors = []
     instances = []
@@ -403,11 +343,13 @@ def instance(request, host_id, vname):
     Instance block
     """
     if not request.user.is_authenticated():
-        return HttpResponseRedirect('/login')
+        return HttpResponseRedirect(reverse('login'))
 
     def show_clone_disk(disks):
         clone_disk = []
         for disk in disks:
+            if disk['image'] is None:
+                continue
             if disk['image'].count(".") and len(disk['image'].rsplit(".", 1)[1]) <= 7:
                 name, suffix = disk['image'].rsplit(".", 1)
                 image = name + "-clone" + "." + suffix
@@ -424,6 +366,7 @@ def instance(request, host_id, vname):
     computes = Compute.objects.all()
     computes_count = len(computes)
     keymaps = QEMU_KEYMAPS
+    console_types = QEMU_CONSOLE_TYPES
 
     try:
         conn = wvmInstance(compute.hostname,
@@ -444,9 +387,9 @@ def instance(request, host_id, vname):
         networks = conn.get_net_device()
         vcpu_range = conn.get_max_cpus()
         memory_range = [256, 512, 768, 1024, 2048, 4096, 6144, 8192, 16384]
-        if not memory in memory_range:
+        if memory not in memory_range:
             insort(memory_range, memory)
-        if not cur_memory in memory_range:
+        if cur_memory not in memory_range:
             insort(memory_range, cur_memory)
         memory_host = conn.get_max_memory()
         vcpu_host = len(vcpu_range)
@@ -455,9 +398,10 @@ def instance(request, host_id, vname):
         if compute.hypervisor == 'qemu':
             snapshots = sorted(conn.get_snapshot(), reverse=True)
             has_managed_save_image = conn.get_managed_save_image()
-            vnc_passwd = conn.get_vnc_passwd()
-            vnc_port = conn.get_vnc_port()
-            vnc_keymap = conn.get_vnc_keymap()
+            console_type = conn.get_console_type()
+            console_port = conn.get_console_port()
+            console_keymap = conn.get_console_keymap()
+            console_passwd = conn.get_console_passwd()
             media_iso = sorted(conn.get_iso_media())
             media = conn.get_media_device()
             disks = conn.get_disk_device()
@@ -466,14 +410,14 @@ def instance(request, host_id, vname):
     except libvirtError as err:
         errors.append(err)
 
-    try:
-        instance = Instance.objects.get(compute_id=host_id, name=vname)
-        if instance.uuid != uuid:
-            instance.uuid = uuid
+        try:
+            instance = Instance.objects.get(compute_id=host_id, name=vname)
+            if instance.uuid != uuid:
+                instance.uuid = uuid
+                instance.save()
+        except Instance.DoesNotExist:
+            instance = Instance(compute_id=host_id, name=vname, uuid=uuid)
             instance.save()
-    except Instance.DoesNotExist:
-        instance = Instance(compute_id=host_id, name=vname, uuid=uuid)
-        instance.save()
 
     acl = Instance.objects.get(compute_id=host_id, name=vname).acl
     if request.user not in acl.all() and not request.user.is_staff:
@@ -513,7 +457,7 @@ def instance(request, host_id, vname):
                         conn.delete_disk()
                 finally:
                     conn.delete()
-                return HttpResponseRedirect('/instances/%s/' % host_id)
+                return HttpResponseRedirect(reverse('instances', args=[host_id]))
             if 'snapshot' in request.POST:
                 name = request.POST.get('name', '')
                 conn.create_snapshot(name)
@@ -557,29 +501,37 @@ def instance(request, host_id, vname):
                 if xml:
                     conn._defineXML(xml)
                     return HttpResponseRedirect(request.get_full_path() + '#instancexml')
-            if 'set_vnc_passwd' in request.POST:
+            if 'set_console_passwd' in request.POST:
                 if request.POST.get('auto_pass', ''):
                     passwd = ''.join([choice(letters + digits) for i in xrange(12)])
                 else:
-                    passwd = request.POST.get('vnc_passwd', '')
+                    passwd = request.POST.get('console_passwd', '')
                     clear = request.POST.get('clear_pass', False)
                     if clear:
                         passwd = ''
                     if not passwd and not clear:
-                        msg = _("Enter the VNC password or select Generate")
+                        msg = _("Enter the console password or select Generate")
                         errors.append(msg)
                 if not errors:
-                    conn.set_vnc_passwd(passwd)
-                    return HttpResponseRedirect(request.get_full_path() + '#vnc_pass')
+                    if not conn.set_console_passwd(passwd):
+                        msg = _("Error setting console password. You should check that your instance have an graphic device.")
+                        errors.append(msg)
+                    else:
+                        return HttpResponseRedirect(request.get_full_path() + '#console_pass')
 
-            if 'set_vnc_keymap' in request.POST:
-                keymap = request.POST.get('vnc_keymap', '')
+            if 'set_console_keymap' in request.POST:
+                keymap = request.POST.get('console_keymap', '')
                 clear = request.POST.get('clear_keymap', False)
                 if clear:
-                    conn.set_vnc_keymap('')
+                    conn.set_console_keymap('')
                 else:
-                    conn.set_vnc_keymap(keymap)
-                return HttpResponseRedirect(request.get_full_path() + '#vnc_keymap')
+                    conn.set_console_keymap(keymap)
+                return HttpResponseRedirect(request.get_full_path() + '#console_keymap')
+
+            if 'set_console_type' in request.POST:
+                console_type = request.POST.get('console_type', '')
+                conn.set_console_type(console_type)
+                return HttpResponseRedirect(request.get_full_path() + '#console_type')
 
             if 'migrate' in request.POST:
                 compute_id = request.POST.get('compute_id', '')
@@ -595,7 +547,7 @@ def instance(request, host_id, vname):
                 conn_migrate.moveto(conn, vname, live, unsafe, xml_del)
                 conn_migrate.define_move(vname)
                 conn_migrate.close()
-                return HttpResponseRedirect('/instance/%s/%s' % (compute_id, vname))
+                return HttpResponseRedirect(reverse('instance', args=[compute_id, vname]))
             if 'delete_snapshot' in request.POST:
                 snap_name = request.POST.get('name', '')
                 conn.snapshot_delete(snap_name)
@@ -615,7 +567,7 @@ def instance(request, host_id, vname):
                         clone_data[post] = request.POST.get(post, '')
 
                 conn.clone_instance(clone_data)
-                return HttpResponseRedirect('/instance/%s/%s' % (host_id, clone_data['name']))
+                return HttpResponseRedirect(reverse('instance', args=[host_id, clone_data['name']]))
 
         conn.close()
 

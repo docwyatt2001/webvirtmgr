@@ -1,6 +1,7 @@
 from django.shortcuts import render_to_response
 from django.http import HttpResponseRedirect
 from django.template import RequestContext
+from django.core.urlresolvers import reverse
 from django.core.exceptions import PermissionDenied
 
 from servers.models import Compute
@@ -16,7 +17,7 @@ def secrets(request, host_id):
     Networks block
     """
     if not request.user.is_authenticated():
-        return HttpResponseRedirect('/login')
+        return HttpResponseRedirect(reverse('login'))
 
     if not request.user.is_staff:
         raise PermissionDenied
@@ -42,7 +43,7 @@ def secrets(request, host_id):
                                 'uuid': secrt.UUIDString(),
                                 'usageType': secrt.usageType(),
                                 'value': secret_value
-            })
+                                })
         if request.method == 'POST':
             if 'create' in request.POST:
                 form = AddSecret(request.POST)
